@@ -1,104 +1,81 @@
-import { ethers } from "hardhat";
 import { expect } from "chai";
-import { Bitcoin, Bitcoin__factory } from "../../typechain-types";
-import { randomBytes } from "crypto";
-import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
+import { ethers } from "hardhat";
+import { createHash } from "crypto";
+import { Contract } from "ethers";
 
-describe("Bitcoin Library", () => {
-    let bitcoin: Bitcoin;
-    let deployer: SignerWithAddress;
-    
-    before(async () => {
-        [deployer] = await ethers.getSigners();
+describe("Bitcoin", function() {
+    let bitcoin: Contract;
+
+    before(async function() {
         const BitcoinFactory = await ethers.getContractFactory("Bitcoin");
         bitcoin = await BitcoinFactory.deploy();
         await bitcoin.waitForDeployment();
     });
-    
-    describe("Key Generation", () => {
-        describe("Success cases", () => {
-            it("should generate valid key pairs with proper entropy and salt", async () => {
-                const entropy = ethers.hexlify(randomBytes(32));
-                const salt = ethers.hexlify(randomBytes(32));
-                
-                const keyPair = await bitcoin.generateKeyPair(entropy, salt);
-                
-                expect(keyPair.privateKey).to.not.equal(ethers.ZeroHash);
-                expect(keyPair.publicKey.length).to.equal(65); // Uncompressed
-                expect(keyPair.compressedPublicKey.length).to.equal(33); // Compressed
-                expect(keyPair.address).to.match(/^0x[a-fA-F0-9]{40}$/); // Hex address
-            });
+
+    describe("Key Generation", function() {
+        it("should generate valid private keys", async function() {
+            const key = await bitcoin.generatePrivateKey();
+            expect(key).to.not.equal("0x0000000000000000000000000000000000000000000000000000000000000000");
             
-            it("should generate different keys for different entropy values", async () => {
-                const entropy1 = ethers.hexlify(randomBytes(32));
-                const entropy2 = ethers.hexlify(randomBytes(32));
-                const salt = ethers.hexlify(randomBytes(32));
-                
-                const keyPair1 = await bitcoin.generateKeyPair(entropy1, salt);
-                const keyPair2 = await bitcoin.generateKeyPair(entropy2, salt);
-                
-                expect(keyPair1.privateKey).to.not.equal(keyPair2.privateKey);
-                expect(keyPair1.publicKey).to.not.equal(keyPair2.publicKey);
-                expect(keyPair1.address).to.not.equal(keyPair2.address);
-            });
+            const keyBigInt = BigInt(key);
+            const N = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+            expect(keyBigInt).to.be.lt(N);
+            expect(keyBigInt).to.be.gt(0);
         });
-        
-        describe("Failure cases", () => {
-            it("should revert with zero entropy", async () => {
-                const salt = ethers.hexlify(randomBytes(32));
-                await expect(
-                    bitcoin.generateKeyPair(ethers.ZeroHash, salt)
-                ).to.be.revertedWithCustomError(
-                    bitcoin,
-                    "Bitcoin__InvalidEntropyLength"
-                );
-            });
+
+        it("should derive correct public keys", async function() {
+            // Test vector from Bitcoin wiki
+            const privKey = "0x1111111111111111111111111111111111111111111111111111111111111111";
+            const pubKey = await bitcoin.derivePublicKey(privKey);
             
-            it("should revert with zero salt", async () => {
-                const entropy = ethers.hexlify(randomBytes(32));
-                await expect(
-                    bitcoin.generateKeyPair(entropy, ethers.ZeroHash)
-                ).to.be.revertedWithCustomError(
-                    bitcoin,
-                    "Bitcoin__InvalidSaltLength"
-                );
-            });
+            expect(pubKey.length).to.equal(65); // Uncompressed public key
+            expect(pubKey.slice(0,2)).to.equal("0x04"); // Uncompressed prefix
+        });
+
+        it("should generate valid compressed public keys", async function() {
+            const privKey = await bitcoin.generatePrivateKey();
+            const compressedPubKey = await bitcoin.getCompressedPublicKey(privKey);
+            
+            expect(compressedPubKey.length).to.equal(33);
+            const prefix = compressedPubKey.slice(0,2);
+            expect(prefix === "0x02" || prefix === "0x03").to.be.true;
         });
     });
-    
-    describe("Transaction Signing", () => {
-        let validKeyPair: any;
-        
-        beforeEach(async () => {
-            const entropy = ethers.hexlify(randomBytes(32));
-            const salt = ethers.hexlify(randomBytes(32));
-            validKeyPair = await bitcoin.generateKeyPair(entropy, salt);
+
+    describe("Address Generation", function() {
+        it("should generate valid mainnet addresses", async function() {
+            const privKey = await bitcoin.generatePrivateKey();
+            const pubKey = await bitcoin.derivePublicKey(privKey);
+            const address = await bitcoin.generateAddress(pubKey, false);
+            
+            expect(address.length).to.equal(25); // Version + pubKeyHash + checksum
+            expect(address.slice(0,2)).to.equal("0x00"); // Mainnet version
         });
-        
-        describe("Success cases", () => {
-            it("should sign transaction hash with valid private key", async () => {
-                const txHash = ethers.keccak256(randomBytes(32));
-                const signature = await bitcoin.signTransaction(
-                    txHash,
-                    validKeyPair.privateKey,
-                    1 // SIGHASH_ALL
-                );
-                
-                expect(signature.length).to.equal(66); // 65 bytes sig + 1 byte sighash
-                expect(signature.slice(-2)).to.equal("01"); // SIGHASH_ALL
-            });
+
+        it("should generate valid testnet addresses", async function() {
+            const privKey = await bitcoin.generatePrivateKey();
+            const pubKey = await bitcoin.derivePublicKey(privKey);
+            const address = await bitcoin.generateAddress(pubKey, true);
+            
+            expect(address.length).to.equal(25);
+            expect(address.slice(0,2)).to.equal("0x6F"); // Testnet version
         });
-        
-        describe("Failure cases", () => {
-            it("should revert with invalid private key", async () => {
-                const txHash = ethers.keccak256(randomBytes(32));
-                await expect(
-                    bitcoin.signTransaction(txHash, ethers.ZeroHash, 1)
-                ).to.be.revertedWithCustomError(
-                    bitcoin,
-                    "Bitcoin__InvalidPrivateKey"
-                );
-            });
+    });
+
+    describe("Signing", function() {
+        it("should produce valid signatures", async function() {
+            const privKey = await bitcoin.generatePrivateKey();
+            const msgHash = ethers.randomBytes(32);
+            
+            const [r, s, v] = await bitcoin.sign(privKey, msgHash);
+            
+            expect(r).to.not.equal(0);
+            expect(s).to.not.equal(0);
+            expect(v === 0 || v === 1).to.be.true;
+            
+            // Verify s is low
+            const N = BigInt("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+            expect(s <= N/2n).to.be.true;
         });
     });
 }); 

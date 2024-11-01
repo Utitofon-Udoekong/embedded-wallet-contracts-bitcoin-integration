@@ -16,4 +16,4 @@ A Solidity library for Bitcoin key generation and transaction signing within sma
 - Comprehensive input validation
 - Error handling for all operations
 
-## Usage 
+ 
